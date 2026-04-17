@@ -54,10 +54,20 @@ class TestWithSdkLabels:
     cfg = with_sdk_labels(bigquery.QueryJobConfig(), feature="trace-read")
     assert "sdk_ai_function" not in cfg.labels
 
-  def test_accepts_none_config(self):
-    cfg = with_sdk_labels(None, feature="trace-read")
-    assert isinstance(cfg, bigquery.QueryJobConfig)
-    assert cfg.labels["sdk_feature"] == "trace-read"
+  def test_requires_explicit_cfg(self):
+    # PR #23 review: passing None silently returned a QueryJobConfig even
+    # for load-job call sites, which would then get passed into
+    # load_table_from_json() with the wrong type. Require the caller to
+    # construct the appropriate config class.
+    with pytest.raises(TypeError, match="cfg"):
+      with_sdk_labels(None, feature="trace-read")
+
+  def test_accepts_load_job_config(self):
+    cfg = bigquery.LoadJobConfig()
+    result = with_sdk_labels(cfg, feature="ontology-build")
+    assert result is cfg
+    assert isinstance(result, bigquery.LoadJobConfig)
+    assert result.labels["sdk_feature"] == "ontology-build"
 
   def test_preserves_existing_user_labels(self):
     cfg = bigquery.QueryJobConfig()
@@ -75,27 +85,27 @@ class TestWithSdkLabels:
 
   def test_rejects_uppercase_feature(self):
     with pytest.raises(ValueError, match="feature"):
-      with_sdk_labels(None, feature="TraceRead")
+      with_sdk_labels(bigquery.QueryJobConfig(), feature="TraceRead")
 
   def test_rejects_feature_with_invalid_chars(self):
     with pytest.raises(ValueError, match="feature"):
-      with_sdk_labels(None, feature="user@example.com")
+      with_sdk_labels(bigquery.QueryJobConfig(), feature="user@example.com")
 
   def test_rejects_feature_over_63_chars(self):
     with pytest.raises(ValueError, match="feature"):
-      with_sdk_labels(None, feature="a" * 64)
+      with_sdk_labels(bigquery.QueryJobConfig(), feature="a" * 64)
 
   def test_rejects_ai_function_with_invalid_chars(self):
     with pytest.raises(ValueError, match="ai_function"):
       with_sdk_labels(
-          None,
+          bigquery.QueryJobConfig(),
           feature="eval-llm-judge",
           ai_function="AI.GENERATE",
       )
 
   def test_accepts_valid_identifiers(self):
     cfg = with_sdk_labels(
-        None,
+        bigquery.QueryJobConfig(),
         feature="context-graph",
         ai_function="ai-generate",
     )
@@ -267,6 +277,53 @@ class TestEndToEndFlow:
     assert not any(
         "reserved SDK label keys" in r.message for r in caplog.records
     )
+
+
+class TestVersionLabel:
+  """PR #23 review: sdk_version must always satisfy BigQuery label rules.
+
+  Replacing `.` with `-` is insufficient for PEP 440 versions that include
+  local metadata (e.g. `1.2.3+gabc`) or epoch markers — the `+` or `!`
+  violates `[a-z0-9_-]`. `_read_version` must normalize-then-validate and
+  fall back to a safe constant.
+  """
+
+  def test_module_version_matches_bq_label_format(self):
+    from bigquery_agent_analytics import _telemetry
+
+    assert _telemetry._LABEL_VALUE_RE.fullmatch(
+        _telemetry._VERSION
+    ), f"_VERSION={_telemetry._VERSION!r} would be rejected by BigQuery"
+
+  def test_read_version_sanitizes_local_metadata(self):
+    from bigquery_agent_analytics import _telemetry
+
+    with mock.patch.object(
+        _telemetry.metadata, "version", return_value="1.2.3+gabc.def"
+    ):
+      got = _telemetry._read_version()
+    assert _telemetry._LABEL_VALUE_RE.fullmatch(got)
+    assert "+" not in got
+    assert "." not in got
+
+  def test_read_version_falls_back_when_package_missing(self):
+    from bigquery_agent_analytics import _telemetry
+
+    with mock.patch.object(
+        _telemetry.metadata,
+        "version",
+        side_effect=_telemetry.metadata.PackageNotFoundError,
+    ):
+      got = _telemetry._read_version()
+    assert got == "unknown"
+
+  def test_read_version_falls_back_when_sanitization_fails(self):
+    # Pathological input that normalizes to empty — falls back safely.
+    from bigquery_agent_analytics import _telemetry
+
+    with mock.patch.object(_telemetry.metadata, "version", return_value=""):
+      got = _telemetry._read_version()
+    assert _telemetry._LABEL_VALUE_RE.fullmatch(got)
 
 
 class TestMakeBqClient:

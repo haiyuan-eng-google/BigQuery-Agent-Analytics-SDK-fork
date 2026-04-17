@@ -45,12 +45,21 @@ _logger = logging.getLogger("bigquery_agent_analytics.telemetry")
 
 
 def _read_version():
+  """Return an SDK version string that is always a valid BigQuery label.
+
+  PEP 440 versions can contain characters BigQuery labels reject —
+  ``+`` (local metadata), ``!`` (epoch), ``.`` (separator). Normalize
+  anything outside ``[a-z0-9_-]`` to ``-``, trim to 63 chars, and fall
+  back to ``"unknown"`` if the result still fails validation.
+  """
   try:
     raw = metadata.version(_SDK_NAME)
   except metadata.PackageNotFoundError:
-    raw = "unknown"
-  # BigQuery labels disallow dots and uppercase; normalize.
-  return raw.replace(".", "-").lower()
+    return "unknown"
+  normalized = re.sub(r"[^a-z0-9_-]", "-", raw.lower())[:63]
+  if not _LABEL_VALUE_RE.fullmatch(normalized):
+    return "unknown"
+  return normalized
 
 
 _VERSION = _read_version()
@@ -104,8 +113,11 @@ def with_sdk_labels(cfg, *, feature, ai_function=None):
   ``LabeledBigQueryClient`` at dispatch time.
 
   Args:
-    cfg: The job config (query or load). Must not be None — call sites
-      typically already build one for ``query_parameters``.
+    cfg: The job config to enrich. Required (not ``None``) — pass a
+      ``bigquery.QueryJobConfig`` for query sites or a
+      ``bigquery.LoadJobConfig`` for load sites. The caller owns the
+      type so labels always land on a config matching the job about
+      to be submitted.
     feature: Stable identifier for the SDK subsystem emitting the job
       (for example ``"trace-read"``, ``"eval-llm-judge"``). Must match
       ``[a-z0-9_-]{1,63}``.
@@ -116,11 +128,15 @@ def with_sdk_labels(cfg, *, feature, ai_function=None):
     The same ``cfg`` with ``sdk_feature`` (and optionally
     ``sdk_ai_function``) set.
   """
+  if cfg is None:
+    raise TypeError(
+        "with_sdk_labels() requires a cfg argument; construct a "
+        "QueryJobConfig or LoadJobConfig at the call site so the "
+        "correct job type is labeled."
+    )
   _validate_label_value("feature", feature)
   if ai_function is not None:
     _validate_label_value("ai_function", ai_function)
-  if cfg is None:
-    cfg = bigquery.QueryJobConfig()
 
   existing = dict(cfg.labels or {})
   existing["sdk_feature"] = feature
