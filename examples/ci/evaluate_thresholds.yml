@@ -52,8 +52,15 @@ jobs:
           --project-id=${{ vars.PROJECT_ID }}
           --dataset-id=${{ vars.DATASET_ID }}
       - name: Token budget
+        # Tune this to your agent's real token distribution. A short
+        # system prompt + few-turn sessions will land in the low
+        # thousands; production agents with longer instructions and
+        # multi-turn tool chains typically want tens of thousands.
+        # Run `bq-agent-sdk evaluate --evaluator=token_efficiency
+        # --last=30d` without `--exit-code` once to see your own
+        # baseline before picking a number.
         run: >
-          bq-agent-sdk evaluate --evaluator=token_efficiency --threshold=50000
+          bq-agent-sdk evaluate --evaluator=token_efficiency --threshold=5000
           --last=24h --agent-id=calendar_assistant --exit-code
           --project-id=${{ vars.PROJECT_ID }}
           --dataset-id=${{ vars.DATASET_ID }}
