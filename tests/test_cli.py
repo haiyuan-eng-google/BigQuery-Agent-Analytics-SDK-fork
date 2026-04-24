@@ -1691,6 +1691,186 @@ class TestCategoricalEval:
     assert "not_a_metric" in combined
 
   @patch("bigquery_agent_analytics.cli._build_client")
+  def test_categorical_eval_exit_code_counts_parse_errors_as_fail(
+      self, mock_build, tmp_path
+  ):
+    """Parse errors and missing classifications count as failing, not unknown.
+
+    Regression guard: if ``build_categorical_report`` drops broken
+    classifications from ``category_distributions`` (it does), the
+    gate must still treat them as failures for the declared metric.
+    Otherwise a totally broken classification run silently passes CI.
+    """
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+
+    report = CategoricalEvaluationReport(
+        dataset="test",
+        total_sessions=4,
+        category_distributions={"tone": {"positive": 1}},
+        session_results=[
+            CategoricalSessionResult(
+                session_id="good",
+                metrics=[
+                    CategoricalMetricResult(
+                        metric_name="tone",
+                        category="positive",
+                        passed_validation=True,
+                    )
+                ],
+            ),
+            CategoricalSessionResult(
+                session_id="parse_err",
+                metrics=[
+                    CategoricalMetricResult(
+                        metric_name="tone",
+                        category=None,
+                        parse_error=True,
+                        passed_validation=False,
+                    )
+                ],
+            ),
+            CategoricalSessionResult(
+                session_id="invalid_cat",
+                metrics=[
+                    CategoricalMetricResult(
+                        metric_name="tone",
+                        category="unexpected",
+                        passed_validation=False,
+                    )
+                ],
+            ),
+            CategoricalSessionResult(
+                session_id="no_classification",
+                metrics=[],
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate_categorical.return_value = report
+    mock_build.return_value = client
+    metrics_path = self._write_metrics(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "categorical-eval",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--metrics-file={metrics_path}",
+            "--exit-code",
+            "--pass-category=tone=positive",
+            "--min-pass-rate=0.9",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    assert "FAIL metric=tone" in combined
+    # 1 passing / 4 total, not 1/1 (which would have been a silent pass).
+    assert "(1/4)" in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_categorical_eval_exit_code_all_parse_errors_fails(
+      self, mock_build, tmp_path
+  ):
+    """Every session parse-errored -> gate fails (0/N), not silent pass."""
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+
+    report = CategoricalEvaluationReport(
+        dataset="test",
+        total_sessions=3,
+        category_distributions={"tone": {}},
+        session_results=[
+            CategoricalSessionResult(
+                session_id=f"s{i}",
+                metrics=[
+                    CategoricalMetricResult(
+                        metric_name="tone",
+                        category=None,
+                        parse_error=True,
+                        passed_validation=False,
+                    )
+                ],
+            )
+            for i in range(3)
+        ],
+    )
+    client = MagicMock()
+    client.evaluate_categorical.return_value = report
+    mock_build.return_value = client
+    metrics_path = self._write_metrics(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "categorical-eval",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--metrics-file={metrics_path}",
+            "--exit-code",
+            "--pass-category=tone=positive",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    assert "FAIL metric=tone" in combined
+    assert "(0/3)" in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_categorical_eval_exit_code_validates_flags_before_run(
+      self, mock_build, tmp_path
+  ):
+    """Missing --pass-category under --exit-code rejects BEFORE BQ work.
+
+    Regression guard: invalid CI configuration should exit 2 without
+    spending BigQuery / LLM credits on the classification run.
+    """
+    client = MagicMock()
+    client.evaluate_categorical.return_value = _mock_categorical_report()
+    mock_build.return_value = client
+    metrics_path = self._write_metrics(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "categorical-eval",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--metrics-file={metrics_path}",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 2
+    client.evaluate_categorical.assert_not_called()
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_categorical_eval_malformed_flag_validates_before_run(
+      self, mock_build, tmp_path
+  ):
+    """Malformed --pass-category under --exit-code rejects BEFORE BQ work."""
+    client = MagicMock()
+    client.evaluate_categorical.return_value = _mock_categorical_report()
+    mock_build.return_value = client
+    metrics_path = self._write_metrics(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "categorical-eval",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--metrics-file={metrics_path}",
+            "--exit-code",
+            "--pass-category=not_a_pair",
+        ],
+    )
+    assert result.exit_code == 2
+    client.evaluate_categorical.assert_not_called()
+
+  @patch("bigquery_agent_analytics.cli._build_client")
   def test_categorical_eval_multiple_pass_categories_per_metric(
       self, mock_build, tmp_path
   ):
