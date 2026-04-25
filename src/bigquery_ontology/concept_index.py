@@ -71,6 +71,21 @@ expression — see RFC §6 finding 6.
 Not re-exported from ``bigquery_ontology/__init__.py`` in v1 — the
 module is importable directly via
 ``from bigquery_ontology.concept_index import build_rows``.
+
+Known v1 limitation — selected-language SKOS labels collapse to
+``label_kind='synonym'``. The current OWL importer
+(``owl_importer.py``) flattens selected-language ``skos:prefLabel``
+/ ``skos:altLabel`` / ``skos:hiddenLabel`` into ``Entity.synonyms``,
+losing the kind distinction. Non-selected-language labels keep
+their kind via ``@<lang>``-suffixed annotation keys (e.g.
+``skos:prefLabel@fr``), so the row builder produces ``pref`` /
+``alt`` / ``hidden`` rows correctly for those. The mismatch is
+upstream of this module; a fix would preserve selected-language
+kinds via annotations rather than flat ``synonyms``. Until that
+ships, B7's winning-label priority (``name > pref > alt > hidden >
+synonym > notation``) demotes selected-language SKOS labels to
+``synonym``, which is acceptable for v1 because the resolver still
+returns them — they just don't outrank a plain ``name`` match.
 """
 
 from __future__ import annotations
@@ -142,8 +157,31 @@ def build_rows(
       continue
     rows.extend(_rows_for_entity(entity, cid, cfp))
 
+  rows = _dedup_rows(rows)
   rows.sort(key=_sort_key)
   return rows
+
+
+def _dedup_rows(rows: list[ConceptIndexRow]) -> list[ConceptIndexRow]:
+  """Collapse rows that share the contract tuple
+  ``(entity_name, label, label_kind, language, scheme)`` into one.
+
+  Duplicate inputs (e.g. ``synonyms=["Acct", "Acct"]`` or an
+  annotation value list with repeats) would otherwise emit duplicate
+  rows that the downstream resolver would have to dedupe at query
+  time. Same value via different ``label_kind`` (e.g. ``"Acct"``
+  declared in both ``synonyms`` and ``skos:altLabel``) is **not** a
+  duplicate — different kinds, different rows, kept.
+  """
+  seen: set[tuple] = set()
+  out: list[ConceptIndexRow] = []
+  for row in rows:
+    key = (row.entity_name, row.label, row.label_kind, row.language, row.scheme)
+    if key in seen:
+      continue
+    seen.add(key)
+    out.append(row)
+  return out
 
 
 def _rows_for_entity(
@@ -236,12 +274,19 @@ def _entity_notation(entity: Entity) -> Optional[str]:
 def _entity_schemes(entity: Entity) -> list[Optional[str]]:
   """Return the scheme membership list. Never empty: an entity not in
   any scheme yields ``[None]`` so a single set of rows is emitted.
+
+  Both ``skos:inScheme`` and ``skos:topConceptOf`` are treated as
+  scheme membership: a top concept of a scheme is still a member of
+  that scheme, and queries like ``WHERE ci.scheme = 'X'`` should
+  catch it. Values are unioned, deduped, and sorted so output is
+  deterministic and a concept declared as both ``inScheme S`` and
+  ``topConceptOf S`` produces a single row set, not two.
   """
-  ann = (entity.annotations or {}).get("skos:inScheme")
-  values = _as_list(ann)
+  ann = entity.annotations or {}
+  values = set(_as_list(ann.get("skos:inScheme")))
+  values.update(_as_list(ann.get("skos:topConceptOf")))
   if not values:
     return [None]
-  # Sort so multi-scheme output ordering is deterministic.
   return sorted(values)
 
 

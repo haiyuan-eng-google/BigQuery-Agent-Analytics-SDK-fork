@@ -344,6 +344,131 @@ class TestMultiScheme:
     )
     assert all(r.scheme is None for r in rows)
 
+  def test_top_concept_of_contributes_scheme_membership(self):
+    """A concept declared as the top of a scheme via
+    ``skos:topConceptOf`` is still a member of that scheme. Without
+    this, queries like ``WHERE ci.scheme = 'Banking'`` miss the
+    scheme's top concepts.
+    """
+    ontology = Ontology(
+        ontology="test",
+        entities=[
+            _account_entity(
+                annotations={"skos:topConceptOf": "BankingTaxonomy"}
+            )
+        ],
+    )
+    rows = build_rows(
+        ontology,
+        _binding(_account_binding()),
+        compiler_version=_COMPILER_VERSION,
+    )
+    schemes = {r.scheme for r in rows}
+    assert schemes == {"BankingTaxonomy"}
+
+  def test_in_scheme_and_top_concept_of_unioned_and_deduped(self):
+    """If both annotations name the same scheme, only one set of
+    rows should be emitted for that scheme. If they name different
+    schemes, both should be present.
+    """
+    ontology = Ontology(
+        ontology="test",
+        entities=[
+            _account_entity(
+                annotations={
+                    "skos:inScheme": "BankingTaxonomy",
+                    "skos:topConceptOf": [
+                        "BankingTaxonomy",  # duplicate of inScheme — dedupe
+                        "FinancialProducts",  # additional scheme — keep
+                    ],
+                }
+            )
+        ],
+    )
+    rows = build_rows(
+        ontology,
+        _binding(_account_binding()),
+        compiler_version=_COMPILER_VERSION,
+    )
+    schemes = sorted({r.scheme for r in rows})
+    assert schemes == ["BankingTaxonomy", "FinancialProducts"]
+    # Exactly one name row per scheme — the duplicate did not double-emit.
+    name_rows = [r for r in rows if r.label_kind == "name"]
+    assert len(name_rows) == 2
+
+
+# ------------------------------------------------------------------ #
+# Row deduplication                                                   #
+# ------------------------------------------------------------------ #
+
+
+class TestRowDedup:
+  """Per the contract: one row per
+  ``(entity_name, label, label_kind, language, scheme)`` tuple.
+  Duplicate input values for the same tuple must collapse to one row;
+  the same value via different sources (different ``label_kind``) is
+  not a duplicate and must keep both rows.
+  """
+
+  def test_duplicate_synonyms_collapse_to_one_row(self):
+    ontology = Ontology(
+        ontology="test",
+        entities=[_account_entity(synonyms=["Acct", "Acct", "Acct"])],
+    )
+    rows = build_rows(
+        ontology,
+        _binding(_account_binding()),
+        compiler_version=_COMPILER_VERSION,
+    )
+    syn_rows = [r for r in rows if r.label_kind == "synonym"]
+    assert len(syn_rows) == 1
+    assert syn_rows[0].label == "Acct"
+
+  def test_duplicate_annotation_values_collapse(self):
+    """If the same annotation value appears twice in the source list,
+    the index emits a single row.
+    """
+    ontology = Ontology(
+        ontology="test",
+        entities=[
+            _account_entity(
+                annotations={"skos:altLabel": ["X", "X", "X"]},
+            )
+        ],
+    )
+    rows = build_rows(
+        ontology,
+        _binding(_account_binding()),
+        compiler_version=_COMPILER_VERSION,
+    )
+    alt_rows = [r for r in rows if r.label_kind == "alt"]
+    assert len(alt_rows) == 1
+    assert alt_rows[0].label == "X"
+
+  def test_same_value_different_kinds_keeps_both_rows(self):
+    """``"Acct"`` as both ``Entity.synonyms`` and
+    ``annotations["skos:altLabel"]`` is two different tuples (kinds
+    differ), so both rows are kept. This is the resolver's job to
+    rank, not the row builder's job to dedupe.
+    """
+    ontology = Ontology(
+        ontology="test",
+        entities=[
+            _account_entity(
+                synonyms=["Acct"],
+                annotations={"skos:altLabel": "Acct"},
+            )
+        ],
+    )
+    rows = build_rows(
+        ontology,
+        _binding(_account_binding()),
+        compiler_version=_COMPILER_VERSION,
+    )
+    same_label = [r for r in rows if r.label == "Acct"]
+    kinds = sorted(r.label_kind for r in same_label)
+    assert kinds == ["alt", "synonym"]
+
 
 # ------------------------------------------------------------------ #
 # Determinism (D2)                                                    #
