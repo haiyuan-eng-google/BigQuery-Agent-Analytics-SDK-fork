@@ -53,10 +53,15 @@ from __future__ import annotations
 
 import re
 
+from ._fingerprint import compile_fingerprint
+from ._fingerprint import compile_id
+from ._fingerprint import fingerprint_model
 from .binding_models import Binding
 from .binding_models import EntityBinding
 from .binding_models import PropertyBinding
 from .binding_models import RelationshipBinding
+from .concept_index import build_rows
+from .concept_index import ConceptIndexRow
 from .graph_ddl_models import ResolvedEdgeTable
 from .graph_ddl_models import ResolvedGraph
 from .graph_ddl_models import ResolvedLabelAndProperties
@@ -643,3 +648,219 @@ def _join_entries(entries: list[list[str]]) -> list[str]:
       else:
         out.append(line)
   return out
+
+
+# --------------------------------------------------------------------- #
+# Concept-index emitter (A3-A5)                                         #
+# --------------------------------------------------------------------- #
+#
+# Companion to ``compile_graph``: emits two ``CREATE OR REPLACE TABLE``
+# statements that materialize the concept-index sidecar tables consumed
+# by ``OntologyRuntime``'s resolvers and verification layer (B1-B7,
+# C1-C6 in the implementation plan). The main table holds one row per
+# ``(entity_name, label, label_kind, language, scheme)`` tuple. The
+# ``__meta`` sibling holds a single provenance row.
+#
+# Design constraints (pinned):
+# - Pure SQL emission. No BigQuery client calls; no DDL execution.
+#   Operators run the emitted SQL via ``bq query``, console, etc.
+# - Atomic per statement via ``CREATE OR REPLACE TABLE T AS SELECT ...``
+#   so each table flips in one transaction; pair-consistency between
+#   main and meta is enforced at runtime via the shared
+#   ``compile_fingerprint``.
+# - Inline-UNNEST path with explicit ``ARRAY<STRUCT<...>>`` typing so
+#   schema is unambiguous even with zero data rows.
+# - Byte-identical SQL across runs for the same inputs; A2's row
+#   builder is already deterministic, so we only need stable column
+#   ordering and stable literal rendering here.
+# - No timestamps in the SQL — ``compiled_at`` was deliberately removed
+#   in the issue #58 round-9 design review for byte-identical output.
+
+# Column lists are tuples to enforce ordering at the type level; any
+# add/remove/rename is a deliberate edit visible in review.
+_MAIN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("entity_name", "STRING"),
+    ("label", "STRING"),
+    ("label_kind", "STRING"),
+    ("notation", "STRING"),
+    ("scheme", "STRING"),
+    ("language", "STRING"),
+    ("is_abstract", "BOOL"),
+    ("compile_id", "STRING"),
+    ("compile_fingerprint", "STRING"),
+)
+
+_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("compile_fingerprint", "STRING"),
+    ("compile_id", "STRING"),
+    ("ontology_fingerprint", "STRING"),
+    ("binding_fingerprint", "STRING"),
+    ("target_project", "STRING"),
+    ("target_dataset", "STRING"),
+    ("compiler_version", "STRING"),
+)
+
+
+def compile_concept_index(
+    ontology: Ontology,
+    binding: Binding,
+    *,
+    output_table: str,
+    compiler_version: str,
+) -> str:
+  """Emit ``CREATE OR REPLACE TABLE`` SQL for the concept index + meta.
+
+  Companion to :func:`compile_graph`. Returns SQL text (does not
+  execute against BigQuery — operators run the result via ``bq
+  query``, the console, an Airflow operator, etc.). Re-running with
+  the same inputs produces byte-identical output.
+
+  Args:
+      ontology: Validated upstream ``Ontology``.
+      binding: Validated upstream ``Binding`` referencing this
+          ontology. Used to determine which concrete entities are in
+          scope (per A2's "abstract always, concrete iff bound" rule)
+          and to populate ``target_project`` / ``target_dataset`` on
+          the meta row.
+      output_table: Fully-qualified destination for the main table —
+          ``project.dataset.table_name``. The ``__meta`` sibling is
+          emitted at ``output_table + "__meta"``. Backticks are added
+          by the emitter; do not pre-quote.
+      compiler_version: Caller-supplied version string flowed into the
+          ``compile_fingerprint`` so semver bumps invalidate stale
+          meta rows.
+
+  Returns:
+      A single string containing both ``CREATE OR REPLACE TABLE``
+      statements separated by a blank line, with a trailing newline.
+
+  Raises:
+      ValueError: If ``output_table`` is not a fully-qualified
+          ``project.dataset.table`` triple, or if the ontology +
+          binding produce zero concrete-or-abstract entities (which
+          would emit a typeless empty array, losing schema).
+  """
+  _validate_output_table(output_table)
+
+  rows = build_rows(ontology, binding, compiler_version=compiler_version)
+  if not rows:
+    raise ValueError(
+        f"Cannot compile concept index for {output_table!r}: ontology + "
+        f"binding produce no concrete or abstract entities. The emitter "
+        f"refuses to write a typeless empty array. Ensure the binding "
+        f"references at least one concrete entity from the ontology, or "
+        f"that the ontology declares at least one abstract entity."
+    )
+
+  ont_fp = fingerprint_model(ontology)
+  bnd_fp = fingerprint_model(binding)
+  cfp = compile_fingerprint(ont_fp, bnd_fp, compiler_version)
+  cid = compile_id(ont_fp, bnd_fp, compiler_version)
+
+  meta_row = (
+      cfp,
+      cid,
+      ont_fp,
+      bnd_fp,
+      binding.target.project,
+      binding.target.dataset,
+      compiler_version,
+  )
+
+  main_sql = _emit_table(
+      table=output_table,
+      columns=_MAIN_COLUMNS,
+      rows=[_main_row_values(r) for r in rows],
+  )
+  meta_sql = _emit_table(
+      table=output_table + "__meta",
+      columns=_META_COLUMNS,
+      rows=[meta_row],
+  )
+
+  return main_sql + "\n" + meta_sql
+
+
+def _main_row_values(row: ConceptIndexRow) -> tuple:
+  """Project a ``ConceptIndexRow`` to the tuple shape expected by
+  :data:`_MAIN_COLUMNS` (positional alignment is part of the
+  byte-deterministic contract).
+  """
+  return (
+      row.entity_name,
+      row.label,
+      row.label_kind,
+      row.notation,
+      row.scheme,
+      row.language,
+      row.is_abstract,
+      row.compile_id,
+      row.compile_fingerprint,
+  )
+
+
+def _emit_table(
+    *,
+    table: str,
+    columns: tuple[tuple[str, str], ...],
+    rows: list[tuple],
+) -> str:
+  """Render one ``CREATE OR REPLACE TABLE T AS SELECT * FROM
+  UNNEST(ARRAY<STRUCT<...>>[<rows>])`` statement.
+
+  Explicit ``ARRAY<STRUCT<...>>`` typing keeps the schema stable for
+  zero-row arrays (the meta table always has exactly one row, but
+  we use the same emitter shape for symmetry and to make the
+  contract explicit).
+  """
+  struct_decl = ", ".join(f"{name} {ty}" for name, ty in columns)
+  lines: list[str] = []
+  lines.append(f"CREATE OR REPLACE TABLE `{table}`")
+  lines.append(f"AS SELECT * FROM UNNEST(ARRAY<STRUCT<{struct_decl}>>[")
+  for i, row in enumerate(rows):
+    rendered = ", ".join(_render_value(v) for v in row)
+    suffix = "," if i < len(rows) - 1 else ""
+    lines.append(f"  ({rendered}){suffix}")
+  lines.append("]);")
+  return "\n".join(lines) + "\n"
+
+
+def _render_value(value) -> str:
+  """Render a Python value to a deterministic BigQuery SQL literal.
+
+  - ``None``                → ``NULL``
+  - ``bool``                → ``TRUE`` / ``FALSE``  (BigQuery convention,
+                              upper case for byte-identical determinism)
+  - ``str``                 → ``'...'`` with single-quote doubling
+                              (``O'Brien`` → ``'O''Brien'``); backslash
+                              passes through (BigQuery doesn't treat
+                              ``\\`` as an escape inside single-quoted
+                              strings unless raw-string syntax is used)
+  - ``int`` / ``float``     → ``str(value)``  (no concept-index column
+                              currently uses these, but the helper is
+                              symmetric)
+  """
+  if value is None:
+    return "NULL"
+  if isinstance(value, bool):
+    return "TRUE" if value else "FALSE"
+  if isinstance(value, (int, float)):
+    return str(value)
+  if isinstance(value, str):
+    return "'" + value.replace("'", "''") + "'"
+  raise TypeError(f"Unsupported SQL literal type: {type(value).__name__}")
+
+
+def _validate_output_table(output_table: str) -> None:
+  """Reject anything that's not a ``project.dataset.table`` triple.
+
+  Backtick-quoting is added by the emitter, so the input must be
+  unquoted dotted form. Empty / one-/two-segment / four-plus-segment
+  values are rejected with a clear message rather than silently
+  producing malformed SQL.
+  """
+  parts = output_table.split(".")
+  if len(parts) != 3 or any(not p for p in parts):
+    raise ValueError(
+        f"output_table must be 'project.dataset.table'; got {output_table!r}"
+    )
