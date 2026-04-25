@@ -278,17 +278,47 @@ class TestValueRendering:
     # literals: ``'O''Brien Bank'``.
     assert "'O''Brien Bank'" in sql
 
-  def test_string_with_backslash_is_preserved(self):
-    """Backslash is not a SQL escape character in single-quoted
-    strings (BigQuery doesn't interpret it specially); it should
-    pass through.
+  def test_backslash_is_escaped(self):
+    """GoogleSQL **does** treat ``\\`` as an escape character inside
+    single-quoted strings. ``'C:\\Users'`` would parse as ``\\U``
+    (the 8-hex-digit Unicode escape) and fail with "Illegal escape
+    sequence." The emitter must double backslashes so the source
+    string round-trips correctly.
     """
-    entities = [_account_entity(synonyms=["foo\\bar"])]
+    entities = [_account_entity(synonyms=["C:\\Users"])]
     sql = _compile(entities=entities)
-    # Either literal backslash preserved or doubled — both are
-    # valid; pick whichever the implementation uses, but ensure no
-    # truncation.
-    assert "foo" in sql and "bar" in sql
+    # BigQuery reads ``'C:\\\\Users'`` as ``C:\Users``.
+    assert "'C:\\\\Users'" in sql
+
+  def test_unrecognized_escape_in_input_is_safely_doubled(self):
+    """``\\q`` is not a valid GoogleSQL escape. The input should be
+    rendered with the backslash doubled so BigQuery sees ``\\\\q``
+    (escaped backslash + literal q).
+    """
+    entities = [_account_entity(synonyms=["foo\\qbar"])]
+    sql = _compile(entities=entities)
+    assert "'foo\\\\qbar'" in sql
+
+  def test_literal_newline_is_escaped(self):
+    """A literal newline character inside a string would otherwise
+    split the SQL across two lines and break the literal. Must be
+    escaped as ``\\n``.
+    """
+    entities = [_account_entity(synonyms=["line1\nline2"])]
+    sql = _compile(entities=entities)
+    assert "'line1\\nline2'" in sql
+    # Sanity: no raw newline character inside any literal.
+    for line in sql.splitlines():
+      # A literal-broken line would contain text after a quote-open
+      # without a matching close on the same line. Cheap proxy:
+      # every line should have an even number of unescaped quotes.
+      pass  # not foolproof; the substring assert above is the real check.
+
+  def test_carriage_return_and_tab_are_escaped(self):
+    entities = [_account_entity(synonyms=["a\rb", "x\ty"])]
+    sql = _compile(entities=entities)
+    assert "'a\\rb'" in sql
+    assert "'x\\ty'" in sql
 
 
 # ------------------------------------------------------------------ #
@@ -339,6 +369,53 @@ class TestScopeAndNotation:
 # ------------------------------------------------------------------ #
 # Empty rows                                                           #
 # ------------------------------------------------------------------ #
+
+
+class TestOutputTableValidation:
+  """Reject inputs that would produce malformed SQL once
+  backtick-wrapped by the emitter.
+  """
+
+  def _compile_with_table(self, output_table: str) -> str:
+    return compile_concept_index(
+        Ontology(ontology="test", entities=[_account_entity()]),
+        _binding(_account_binding()),
+        output_table=output_table,
+        compiler_version=_COMPILER_VERSION,
+    )
+
+  def test_rejects_pre_quoted_table(self):
+    with pytest.raises(ValueError, match="backtick"):
+      self._compile_with_table("`proj.ds.idx`")
+
+  def test_rejects_internal_backtick(self):
+    """Even one stray backtick would terminate our outer quoting."""
+    with pytest.raises(ValueError, match="backtick"):
+      self._compile_with_table("proj.ds.idx`malicious`")
+
+  def test_rejects_segment_with_invalid_characters(self):
+    """Segments must use BigQuery identifier-compatible chars."""
+    with pytest.raises(ValueError, match="invalid"):
+      self._compile_with_table("proj.ds.idx malicious")
+
+  def test_rejects_segment_with_slash(self):
+    with pytest.raises(ValueError, match="invalid"):
+      self._compile_with_table("proj.ds.idx/with/slashes")
+
+  def test_rejects_two_segment_path(self):
+    with pytest.raises(ValueError, match="project.dataset.table"):
+      self._compile_with_table("ds.idx")
+
+  def test_rejects_four_segment_path(self):
+    with pytest.raises(ValueError, match="project.dataset.table"):
+      self._compile_with_table("a.b.c.d")
+
+  def test_accepts_valid_three_segment_path(self):
+    """Project IDs may contain hyphens (BigQuery convention); dataset
+    and table identifiers may use underscores. Both must be accepted.
+    """
+    sql = self._compile_with_table("my-proj-123.my_dataset.my_table_v2")
+    assert "`my-proj-123.my_dataset.my_table_v2`" in sql
 
 
 class TestEmptyRows:

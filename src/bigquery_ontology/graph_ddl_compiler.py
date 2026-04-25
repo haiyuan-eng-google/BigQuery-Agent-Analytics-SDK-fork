@@ -826,16 +826,17 @@ def _emit_table(
 
 
 def _render_value(value) -> str:
-  """Render a Python value to a deterministic BigQuery SQL literal.
+  """Render a Python value to a deterministic GoogleSQL literal.
 
   - ``None``                → ``NULL``
   - ``bool``                → ``TRUE`` / ``FALSE``  (BigQuery convention,
                               upper case for byte-identical determinism)
-  - ``str``                 → ``'...'`` with single-quote doubling
-                              (``O'Brien`` → ``'O''Brien'``); backslash
-                              passes through (BigQuery doesn't treat
-                              ``\\`` as an escape inside single-quoted
-                              strings unless raw-string syntax is used)
+  - ``str``                 → single-quoted literal via
+                              :func:`_escape_string` — backslashes,
+                              single quotes, and ASCII control
+                              characters are all escaped so any
+                              valid Python string round-trips through
+                              GoogleSQL.
   - ``int`` / ``float``     → ``str(value)``  (no concept-index column
                               currently uses these, but the helper is
                               symmetric)
@@ -847,20 +848,95 @@ def _render_value(value) -> str:
   if isinstance(value, (int, float)):
     return str(value)
   if isinstance(value, str):
-    return "'" + value.replace("'", "''") + "'"
+    return _escape_string(value)
   raise TypeError(f"Unsupported SQL literal type: {type(value).__name__}")
 
 
+# Named C-style escapes BigQuery accepts inside single-quoted strings.
+# Anything else in the 0x00-0x1F + 0x7F range goes through ``\xHH``.
+_NAMED_CTRL_ESCAPES: dict[str, str] = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+_CTRL_RE = re.compile(r"[\x00-\x1F\x7F]")
+
+
+def _escape_string(value: str) -> str:
+  """Render a Python ``str`` as a GoogleSQL single-quoted literal.
+
+  GoogleSQL single-quoted strings treat ``\\`` as an escape character
+  (e.g. ``\\n``, ``\\xHH``, ``\\UHHHHHHHH``) and disallow raw
+  newlines. A naive ``"'" + s.replace("'", "''") + "'"`` produces
+  invalid SQL when the input contains:
+
+  - A literal backslash (``"C:\\Users"`` → ``'C:\\Users'`` →
+    BigQuery parses ``\\U`` as the 8-hex-digit Unicode escape and
+    fails with "Illegal escape sequence").
+  - An unrecognized escape sequence in the source (``"foo\\qbar"`` →
+    ``\\q`` is rejected by the lexer).
+  - A raw newline / carriage return / tab, which would split the
+    literal across source lines and break the surrounding SQL.
+
+  Escape order matters: backslashes first (so the named-escape pass
+  below isn't itself re-escaped), then single quotes (BigQuery
+  accepts both ``''`` and ``\\'`` — we use ``''`` for byte-stable
+  output), then control characters.
+  """
+  out = value.replace("\\", "\\\\")
+  out = out.replace("'", "''")
+  out = _CTRL_RE.sub(_escape_ctrl_char, out)
+  return "'" + out + "'"
+
+
+def _escape_ctrl_char(match: re.Match) -> str:
+  ch = match.group(0)
+  if ch in _NAMED_CTRL_ESCAPES:
+    return _NAMED_CTRL_ESCAPES[ch]
+  return f"\\x{ord(ch):02x}"
+
+
+# Each segment of a fully-qualified BigQuery identifier (project,
+# dataset, table) accepts letters, digits, hyphens, and underscores.
+# Hyphens are valid in project IDs; underscores in datasets/tables.
+# The validator is intentionally a bit broader than the strictest
+# interpretation so legitimate names aren't rejected, but it does
+# reject characters that would let a caller break out of the
+# backtick-wrapped emission (whitespace, slashes, semicolons,
+# backticks, dots beyond the three segments).
+_OUTPUT_TABLE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _validate_output_table(output_table: str) -> None:
-  """Reject anything that's not a ``project.dataset.table`` triple.
+  """Reject anything that's not a clean ``project.dataset.table`` triple.
 
   Backtick-quoting is added by the emitter, so the input must be
-  unquoted dotted form. Empty / one-/two-segment / four-plus-segment
-  values are rejected with a clear message rather than silently
-  producing malformed SQL.
+  the unquoted dotted form. The validator rejects:
+
+  - Inputs containing backticks (caller should not pre-quote — and a
+    stray backtick would terminate our outer quoting and break SQL).
+  - Anything that doesn't split into exactly three non-empty
+    dot-separated segments.
+  - Segments containing characters outside ``[A-Za-z0-9_-]`` —
+    spaces, slashes, semicolons, etc., that could otherwise produce
+    malformed SQL inside the emitter's backtick wrapping.
   """
+  if "`" in output_table:
+    raise ValueError(
+        f"output_table must not contain backticks; the emitter adds "
+        f"them. Got {output_table!r}."
+    )
   parts = output_table.split(".")
   if len(parts) != 3 or any(not p for p in parts):
     raise ValueError(
         f"output_table must be 'project.dataset.table'; got {output_table!r}"
     )
+  for part in parts:
+    if not _OUTPUT_TABLE_SEGMENT_RE.match(part):
+      raise ValueError(
+          f"output_table segment {part!r} contains invalid characters; "
+          f"each segment must match [A-Za-z0-9_-]+. Got {output_table!r}."
+      )
