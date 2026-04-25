@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helper the SQL paths use to safely substitute the template into
   ``CONCAT()``; exposed publicly for downstream code that needs the
   same shape.
+- ``bq-agent-sdk evaluate --exit-code`` FAIL lines now carry a bounded
+  ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback`` for
+  LLM-judge failures. The snippet collapses internal whitespace to a
+  single space, truncates to 120 characters with an ellipsis, and is
+  omitted entirely for code-based metrics (which leave
+  ``llm_feedback`` empty). CI logs now explain *why* the judge said
+  the session failed without forcing the reader to chase the JSON
+  output.
+
+### Changed
+
+- ``--strict`` help text and ``SDK.md §4`` clarified to match shipped
+  behavior. ``--strict`` only flips AI.GENERATE rows whose typed output
+  is empty/NULL from silently-skipped to explicitly-failed-and-counted.
+  API-fallback parse errors already coerce to ``score=0.0`` and fail
+  any non-zero threshold without ``--strict``.
 
 ## [0.2.2] - 2026-04-24
 

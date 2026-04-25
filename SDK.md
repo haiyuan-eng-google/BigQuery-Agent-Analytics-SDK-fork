@@ -275,7 +275,26 @@ print(report.summary())
 
 ### Strict Mode
 
-When `strict=True`, sessions where the LLM judge returns empty or unparseable output are marked as **failed** instead of silently passing. Operational counters are placed in `report.details` (not `aggregate_scores`) so downstream consumers can treat scores as purely normalized metrics:
+`strict=True` only changes behavior on the **AI.GENERATE** path
+(`report.details["execution_mode"] == "ai_generate"`). When the
+typed `AI.GENERATE` row comes back with an empty or NULL `scores`
+dict — the judge model returned no parseable output at all —
+`strict=False` (the default) leaves the session with `passed=True`
+by default and silently drops it from the gate. `strict=True` flips
+those sessions to `passed=False`, marks each affected
+`SessionScore.details["parse_error"] = True`, and exposes a
+report-level `parse_errors` counter under `report.details`.
+
+API-fallback parse errors don't need `strict=True`: when the Gemini
+API returns malformed output the SDK already coerces the score to
+`0.0`, so the session fails any non-zero threshold the criterion
+declared. Use `strict=True` when your evaluator relies on the
+AI.GENERATE path and you want unrecoverable rows counted, not
+ignored.
+
+Operational counters are placed in `report.details` (not
+`aggregate_scores`) so downstream consumers can treat scores as
+purely normalized metrics:
 
 ```python
 report = client.evaluate(
