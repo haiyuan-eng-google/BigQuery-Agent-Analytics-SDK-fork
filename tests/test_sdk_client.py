@@ -711,28 +711,68 @@ class TestSplitJudgePromptTemplate:
     rebuilt = prefix + "TT" + middle + "FR" + suffix
     assert rebuilt == tmpl.format(trace_text="TT", final_response="FR")
 
-  def test_missing_final_response_falls_back_to_default_separator(self):
+  def test_missing_final_response_keeps_label_next_to_response(self):
+    """Custom template with {trace_text} only — Response: label must
+    precede the appended response value.
+
+    The SQL CONCAT runs prefix ++ trace_text ++ middle ++
+    final_response ++ suffix, so a synthesized label for the
+    missing placeholder belongs *immediately before* the value it
+    labels — not on the far side of it.
+    """
     from bigquery_agent_analytics.evaluators import split_judge_prompt_template
 
     tmpl = "Prefix\n{trace_text}\nThen something."
     prefix, middle, suffix = split_judge_prompt_template(tmpl)
-    assert prefix == "Prefix\n"
-    assert middle == "\nThen something."
-    # No {final_response} placeholder in the template -> we still
-    # tell the model we'll append a Response section.
-    assert "Response" in suffix
+    rebuilt = prefix + "TRACE" + middle + "RESPONSE" + suffix
+    assert "Response:\nRESPONSE" in rebuilt
+    # Whatever followed {trace_text} in the original template
+    # appears before the synthesized response label.
+    assert "Then something." in rebuilt
+    assert rebuilt.index("Then something.") < rebuilt.index(
+        "Response:\nRESPONSE"
+    )
 
-  def test_missing_trace_text_keeps_full_template_as_prefix(self):
+  def test_missing_trace_text_keeps_label_next_to_trace(self):
+    """Custom template with {final_response} only — Trace: label must
+    precede the appended trace value.
+
+    Regression guard for the reviewer-flagged bug: earlier versions
+    returned ``("", "\\nTrace:\\n" + before_response, suffix)`` which
+    injected ``<TRACE>\\nTrace:\\n<original prompt>...`` — trace
+    landed on the wrong side of the label, and the user's prompt
+    text appeared after the trace instead of before it.
+    """
+    from bigquery_agent_analytics.evaluators import split_judge_prompt_template
+
+    tmpl = "Custom rules.\n{final_response}\nDone."
+    prefix, middle, suffix = split_judge_prompt_template(tmpl)
+    rebuilt = prefix + "TRACE" + middle + "RESPONSE" + suffix
+    # User's "Custom rules." prose appears before the synthesized
+    # Trace: label, and the trace value sits right after the label.
+    assert "Custom rules.\n" in rebuilt
+    assert "Trace:\nTRACE" in rebuilt
+    assert rebuilt.index("Custom rules.") < rebuilt.index("Trace:\nTRACE")
+    # Response follows the trace, and the user's "Done." tail
+    # appears after the response.
+    assert rebuilt.index("Trace:\nTRACE") < rebuilt.index("RESPONSE")
+    assert rebuilt.index("RESPONSE") < rebuilt.index("Done.")
+
+  def test_no_placeholders_appends_labeled_trace_then_response(self):
+    """Template with neither placeholder — labels precede their values.
+
+    Original instructions stay first; trace block comes next with
+    its label; response block comes last with its label.
+    """
     from bigquery_agent_analytics.evaluators import split_judge_prompt_template
 
     tmpl = "Just instructions, no placeholders."
     prefix, middle, suffix = split_judge_prompt_template(tmpl)
-    # Don't truncate. Better to send the whole thing verbatim and
-    # let SQL append a labeled trace + response than to silently
-    # drop content.
-    assert prefix == tmpl
-    assert "Trace" in middle
-    assert "Response" in suffix
+    rebuilt = prefix + "TRACE" + middle + "RESPONSE" + suffix
+    assert rebuilt.startswith(tmpl)
+    assert "Trace:\nTRACE" in rebuilt
+    assert "Response:\nRESPONSE" in rebuilt
+    assert rebuilt.index("Trace:\nTRACE") < rebuilt.index("Response:\nRESPONSE")
 
 
 class TestMultiCriterionJudge:

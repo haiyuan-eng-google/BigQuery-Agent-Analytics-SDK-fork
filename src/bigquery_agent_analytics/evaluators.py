@@ -994,30 +994,56 @@ def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
       ``(prefix, middle, suffix)`` such that
       ``prefix + trace_text + middle + final_response + suffix``
       reproduces ``prompt_template.format(trace_text=..., final_response=...)``
-      for any inputs. When a placeholder is missing, the matching
-      segment falls back to a labeled separator so AI.GENERATE
-      still produces *some* output rather than failing the query.
+      for any inputs. When a placeholder is missing, the helper
+      synthesizes a labeled section for the missing input and
+      places the label *immediately before* the injected value
+      (label first, then value), so the model reads
+      ``...Trace:\n<TRACE>\nResponse:\n<RESPONSE>...`` rather than
+      the value followed by an orphan label.
   """
   has_trace = "{trace_text}" in prompt_template
   has_response = "{final_response}" in prompt_template
 
+  # Reminder for the fallback branches below: the SQL CONCAT runs
+  #   prefix ++ trace_text ++ middle ++ final_response ++ suffix
+  # so any label we synthesize for an absent placeholder must end
+  # up *next to* the value it labels (label first, then value),
+  # not on the far side of it. Earlier versions appended labels
+  # *after* the values, which produced ``<TRACE>\nTrace:\n...``.
+
   if not has_trace and not has_response:
-    # No placeholders at all. Send the whole un-formatted template
-    # verbatim as the prefix and let SQL CONCAT append labeled
-    # trace + response after it.
-    return prompt_template, "\nTrace:\n", "\nResponse:\n"
+    # No placeholders at all. Append a labeled trace + response
+    # block after the user's instructions. The labels precede the
+    # values so the model reads them in order.
+    return (
+        prompt_template + "\nTrace:\n",
+        "\nResponse:\n",
+        "",
+    )
 
   if not has_trace:
-    # final_response placeholder only. Honor it; prefix everything
-    # before it with the trace.
+    # final_response placeholder only. Honor the user's structure
+    # and inject a labeled trace block right before the response,
+    # so the trace label sits next to the trace.
     formatted = prompt_template.format(final_response=_RESPONSE_SENTINEL)
-    middle, _, suffix = formatted.partition(_RESPONSE_SENTINEL)
-    return "", "\nTrace:\n" + middle, suffix
+    before_response, _, after_response = formatted.partition(_RESPONSE_SENTINEL)
+    return (
+        before_response + "\nTrace:\n",
+        "\n",
+        after_response,
+    )
 
   if not has_response:
+    # trace_text placeholder only. Append a labeled response block
+    # after the original template's tail, so the response label
+    # sits next to the response value (not after it).
     formatted = prompt_template.format(trace_text=_TRACE_SENTINEL)
-    prefix, _, middle = formatted.partition(_TRACE_SENTINEL)
-    return prefix, middle, "\nResponse:\n"
+    prefix, _, after_trace = formatted.partition(_TRACE_SENTINEL)
+    return (
+        prefix,
+        after_trace + "\nResponse:\n",
+        "",
+    )
 
   formatted = prompt_template.format(
       trace_text=_TRACE_SENTINEL,
