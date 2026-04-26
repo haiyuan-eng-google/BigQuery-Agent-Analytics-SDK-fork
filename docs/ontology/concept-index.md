@@ -1,7 +1,7 @@
 # Concept Index — Reference (Phase 1)
 
 Status: draft
-Scope: the BigQuery sidecar tables emitted by `gm compile --emit-concept-index` and consumed at runtime by the `bigquery_agent_analytics` SDK's resolver / verification layer. Companion to [`compilation.md`](compilation.md) (`gm compile` core) and [`cli.md`](cli.md) (`gm` flag reference).
+Scope: the BigQuery sidecar tables emitted by `gm compile --emit-concept-index`. Phase 1 ships the SQL emission only; the runtime consumer in `bigquery_agent_analytics` (`OntologyRuntime`, resolvers, strict verification) lands in Phases 2–3 per [`docs/implementation_plan_concept_index_runtime.md`](../implementation_plan_concept_index_runtime.md). Companion to [`compilation.md`](compilation.md) (`gm compile` core) and [`cli.md`](cli.md) (`gm` flag reference).
 
 The concept index is **opt-in**: a `gm compile` invocation without `--emit-concept-index` is byte-identical to today and writes no extra DDL.
 
@@ -22,7 +22,7 @@ The concept index is the read-side fabric for **Direction 3** of the SDK — run
 - A curation script that canonicalizes a column of historical user inputs into declared entity keys for an eval dataset.
 - A pre-processing job that resolves brief parameters against the ontology before briefs are enqueued downstream.
 
-The SDK ships `OntologyRuntime` + `EntityResolver` (Phase 2) as the Python surface over this index. For bulk analytics, a SQL pushdown directly against the index table is the natural pattern; see "Common SQL patterns" below.
+A future Phase 2 will ship `OntologyRuntime` + `EntityResolver` in `bigquery_agent_analytics` as the Python surface over this index. For Phase 1 (and for bulk analytics in general), a SQL pushdown directly against the index table is the supported pattern; see §8 "Common SQL patterns" below.
 
 ## 3. Emit the SQL
 
@@ -59,7 +59,7 @@ gm compile binding.yaml \
 - **`--emit-concept-index` without `--concept-index-table`** → exit 2, `cli-missing-flag`. No silent global default per the RFC.
 - **`--concept-index-table` without `--emit-concept-index`** → exit 2, `cli-orphan-flag`. Surfaces typos rather than silently dropping the value.
 - **Invalid `--concept-index-table` value** (not three segments, contains backticks, invalid characters in a segment) → exit 1, structured error with the exact reason.
-- **All-abstract or zero-bound ontology** → exit 1. The compiler refuses to emit a typeless empty array.
+- **Zero-row case** → exit 1. The compiler refuses to emit a typeless empty array. This fires only when the ontology declares no abstract entities **and** the binding references no concrete entities (the row builder produces an empty list). An abstract-only ontology compiles successfully — abstract entities are always included regardless of binding (per the scope rule in §4 below).
 
 ## 4. Main table schema
 
@@ -136,7 +136,9 @@ CREATE TABLE `<output_table>__meta` (
 );
 ```
 
-Single row per emit. The meta table never contains historical compile data — each `gm compile --emit-concept-index` overwrites both tables atomically.
+Single row per emit. The meta table never contains historical compile data — each `gm compile --emit-concept-index` overwrites it.
+
+**Atomicity contract.** Each `CREATE OR REPLACE TABLE` is atomic on its own (BigQuery DDL semantics). The main and `__meta` tables, however, are written as **two separate statements** and are not replaced in one cross-table transaction; BigQuery has no DDL transactions across tables. There is therefore a small refresh window where an external reader could observe the old main with the new meta, or vice versa. The shared `compile_fingerprint` exists exactly for this case: a runtime reader runs a pair-consistency check (see §6 "Provenance contract" and the manual SQL in §8) and treats a `main.compile_fingerprint != meta.compile_fingerprint` mismatch as "refresh in progress" rather than as steady-state corruption.
 
 ## 6. Provenance contract — Option 2
 
@@ -149,7 +151,7 @@ The concept index carries two provenance columns with **distinct roles**:
 
 Structural invariant: `compile_id == compile_fingerprint[:12]`. The short form is always derived from the full form, never the reverse. This is enforced inside `_fingerprint.py` (the function `compile_id` literally returns `compile_fingerprint(...)[:12]`). A future refactor cannot let the two drift out of sync — see RFC §11 "Decisions pinned" (Option 2).
 
-Strict verification at runtime uses `compile_fingerprint` exclusively; `compile_id` never appears on the verification path. A reducer "optimization" that swaps a strict query from `compile_fingerprint` to `compile_id` would reintroduce a 48-bit collision hole and is rejected by the W2 watchpoint regression tests.
+The Phase 3 strict-verification layer (when it lands) will use `compile_fingerprint` exclusively; `compile_id` is not on the verification path. A reducer "optimization" that swaps a strict query from `compile_fingerprint` to `compile_id` would reintroduce a 48-bit collision hole — the W2 watchpoint in the implementation plan calls this out and the Phase 3 tests will pin it.
 
 ## 7. Determinism
 
@@ -167,7 +169,7 @@ If `--compiler-version` is left at its default (the installed package version), 
 
 ## 8. Common SQL patterns
 
-The runtime layer (`OntologyRuntime` + resolvers, Phase 2) is a Python surface over this index. For bulk analytics, SQL pushdown is the natural pattern.
+A future Phase 2 will ship `OntologyRuntime` + resolvers as a Python surface over this index. Until then — and as the supported path for bulk analytics regardless — SQL pushdown directly against the index is the natural pattern. The patterns below are written against the schema this PR emits; nothing in them depends on Phase 2 / 3 code shipping.
 
 ### Bulk resolution report
 
@@ -250,7 +252,7 @@ SELECT compile_fingerprint, ontology_fingerprint, binding_fingerprint
 FROM `proj.ds.ontology_concept_index__meta`;
 ```
 
-The SDK's `OntologyRuntime` does this automatically via the verification layer (Phase 3); the queries above are useful for ad-hoc operator inspection.
+A future Phase 3 will wire the strict-verification layer into `OntologyRuntime` so it runs these checks automatically on first access and on a configurable TTL. Until then, the queries above are the supported manual path for ad-hoc operator inspection — and they remain useful afterwards for one-off debugging even once the runtime layer ships.
 
 ## 9. Out of scope (Phase 1)
 
