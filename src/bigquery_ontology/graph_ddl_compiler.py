@@ -868,26 +868,30 @@ _CTRL_RE = re.compile(r"[\x00-\x1F\x7F]")
 def _escape_string(value: str) -> str:
   """Render a Python ``str`` as a GoogleSQL single-quoted literal.
 
-  GoogleSQL single-quoted strings treat ``\\`` as an escape character
-  (e.g. ``\\n``, ``\\xHH``, ``\\UHHHHHHHH``) and disallow raw
-  newlines. A naive ``"'" + s.replace("'", "''") + "'"`` produces
-  invalid SQL when the input contains:
+  GoogleSQL string literals follow C-style escaping, **not** ANSI
+  SQL's quote-doubling. The naive ANSI form
+  ``"'" + s.replace("'", "''") + "'"`` produces invalid GoogleSQL
+  when the input contains:
 
-  - A literal backslash (``"C:\\Users"`` → ``'C:\\Users'`` →
+  - A single quote — ``'O''Brien'`` parses in GoogleSQL as two
+    concatenated string literals (``'O'`` and ``'Brien'``) and
+    errors with "concatenated string literals must be separated by
+    whitespace or comments." GoogleSQL's escape for ``'`` inside a
+    single-quoted literal is ``\\'``.
+  - A literal backslash — ``"C:\\Users"`` → ``'C:\\Users'`` →
     BigQuery parses ``\\U`` as the 8-hex-digit Unicode escape and
-    fails with "Illegal escape sequence").
-  - An unrecognized escape sequence in the source (``"foo\\qbar"`` →
-    ``\\q`` is rejected by the lexer).
-  - A raw newline / carriage return / tab, which would split the
-    literal across source lines and break the surrounding SQL.
+    fails with "Illegal escape sequence."
+  - An unrecognized escape in the input — ``"foo\\qbar"`` →
+    ``\\q`` is rejected by the lexer.
+  - A raw newline / carriage return / tab — these split the literal
+    across source lines and break the surrounding SQL.
 
-  Escape order matters: backslashes first (so the named-escape pass
-  below isn't itself re-escaped), then single quotes (BigQuery
-  accepts both ``''`` and ``\\'`` — we use ``''`` for byte-stable
-  output), then control characters.
+  Escape order matters: backslashes first (so the quote and
+  control-char escapes added below aren't re-escaped), then single
+  quotes via ``\\'``, then control characters.
   """
   out = value.replace("\\", "\\\\")
-  out = out.replace("'", "''")
+  out = out.replace("'", "\\'")
   out = _CTRL_RE.sub(_escape_ctrl_char, out)
   return "'" + out + "'"
 

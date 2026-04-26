@@ -270,13 +270,23 @@ class TestValueRendering:
     assert "TRUE" in main
     assert "FALSE" in main
 
-  def test_string_with_single_quote_is_escaped(self):
-    """A label like ``"O'Brien Bank"`` must not break SQL quoting."""
+  def test_string_with_single_quote_is_backslash_escaped(self):
+    """GoogleSQL escapes single quotes as ``\\'`` inside single-quoted
+    literals, **not** as ``''``. ANSI SQL (and PostgreSQL) accept the
+    quote-doubling form, but GoogleSQL rejects it: ``'O''Brien'``
+    parses as two concatenated literals (``'O'`` and ``'Brien'``)
+    and errors with "concatenated string literals must be separated
+    by whitespace or comments." The emitter must use the backslash
+    form.
+    """
     entities = [_account_entity(synonyms=["O'Brien Bank"])]
     sql = _compile(entities=entities)
-    # Doubled-quote escape is BigQuery's standard form for STRING
-    # literals: ``'O''Brien Bank'``.
-    assert "'O''Brien Bank'" in sql
+    # Python literal ``"'O\\'Brien Bank'"`` is the 17-character SQL
+    # text: apostrophe, O, backslash, apostrophe, Brien, space, Bank,
+    # apostrophe.
+    assert "'O\\'Brien Bank'" in sql
+    # And the broken doubled-quote form must NOT appear.
+    assert "'O''Brien" not in sql
 
   def test_backslash_is_escaped(self):
     """GoogleSQL **does** treat ``\\`` as an escape character inside
