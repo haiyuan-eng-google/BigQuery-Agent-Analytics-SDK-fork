@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **LLM-as-Judge AI.GENERATE path now executes against current
+  BigQuery.** Earlier versions emitted a table-valued
+  ``FROM session_traces, AI.GENERATE(...) AS result`` shape with
+  ``output_schema`` and a flat ``model_params`` dict. Current
+  ``AI.GENERATE`` is a scalar function that returns a STRUCT;
+  the table-valued form raises ``Table-valued function not found``
+  and the flat ``model_params`` raises ``does not conform to the
+  GenerateContent request body``. Mocked unit tests passed because
+  they bypassed real query execution. The SDK now renders a
+  ``SELECT AI.GENERATE(...).score, ...`` query with a
+  ``generationConfig``-wrapped ``model_params`` and ``output_schema``
+  on the scalar form, runs against live BigQuery, and unwraps the
+  returned struct's ``score`` / ``justification`` / ``status``
+  fields.
+
+### Added
+
+- ``evaluators.render_ai_generate_judge_query(...)`` is the new
+  entry point that builds the AI.GENERATE batch SQL. ``connection_id``
+  is optional — when omitted the call uses end-user credentials;
+  when supplied it inlines the ``connection_id =>`` argument so
+  callers can route through a service-account-owned connection
+  when their environment requires it.
+- ``Client.connection_id`` already existed; it is now plumbed
+  through to ``_ai_generate_judge`` so a connection set at client
+  construction propagates to the judge SQL automatically.
+- Live BigQuery integration tests for the LLM-judge AI.GENERATE
+  path (``tests/test_ai_generate_judge_live.py``). Skipped by
+  default; opt in with ``BQAA_RUN_LIVE_TESTS=1`` plus
+  ``PROJECT_ID`` / ``DATASET_ID``. Three tests cover SQL parse
+  acceptance, expected result-schema column names, and the
+  ``connection_id`` escape hatch when ``BQAA_AI_GENERATE_CONNECTION_ID``
+  is set. Catches the class of mock-divergence bug that let the
+  prior broken template ship.
+
+
+
 - **LLM-as-Judge AI.GENERATE / ML.GENERATE_TEXT now uses the full Python
   prompt template.** Previously both BQ-native paths sent only
   ``prompt_template.split('{trace_text}')[0]`` to BigQuery, silently
