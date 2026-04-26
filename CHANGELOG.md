@@ -23,15 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the scalar form, runs against live BigQuery, and unwraps the
   returned struct's ``score`` / ``justification`` / ``status``
   fields.
+- **LLM-as-Judge AI.GENERATE / ML.GENERATE_TEXT now uses the full
+  Python prompt template.** Previously both BQ-native paths sent
+  only ``prompt_template.split('{trace_text}')[0]`` to BigQuery,
+  silently dropping every instruction that followed the
+  placeholders — including the per-criterion output-format spec
+  the judge model needs to score consistently with the
+  API-fallback path. The two BQ paths and the Python API path now
+  produce comparable scores against the same prompt.
 
 ### Added
 
 - ``evaluators.render_ai_generate_judge_query(...)`` is the new
-  entry point that builds the AI.GENERATE batch SQL. ``connection_id``
-  is optional — when omitted the call uses end-user credentials;
-  when supplied it inlines the ``connection_id =>`` argument so
-  callers can route through a service-account-owned connection
-  when their environment requires it.
+  entry point that builds the AI.GENERATE batch SQL.
+  ``connection_id`` is optional — when omitted the call uses
+  end-user credentials; when supplied it inlines the
+  ``connection_id =>`` argument so callers can route through a
+  service-account-owned connection when their environment
+  requires it.
 - ``Client.connection_id`` already existed; it is now plumbed
   through to ``_ai_generate_judge`` so a connection set at client
   construction propagates to the judge SQL automatically.
@@ -40,41 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default; opt in with ``BQAA_RUN_LIVE_TESTS=1`` plus
   ``PROJECT_ID`` / ``DATASET_ID``. Three tests cover SQL parse
   acceptance, expected result-schema column names, and the
-  ``connection_id`` escape hatch when ``BQAA_AI_GENERATE_CONNECTION_ID``
-  is set. Catches the class of mock-divergence bug that let the
-  prior broken template ship.
-
-
-
-- **LLM-as-Judge AI.GENERATE / ML.GENERATE_TEXT now uses the full Python
-  prompt template.** Previously both BQ-native paths sent only
-  ``prompt_template.split('{trace_text}')[0]`` to BigQuery, silently
-  dropping every instruction that followed the placeholders — including
-  the per-criterion output-format spec the judge model needs to score
-  consistently with the API-fallback path. The two BQ paths and the
-  Python API path now produce comparable scores against the same prompt.
-
-### Added
-
-- ``EvaluationReport.details["execution_mode"]`` is now populated for
-  LLM-as-Judge runs with one of ``ai_generate``, ``ml_generate_text``,
-  ``api_fallback``, or ``no_op`` — matching the value space the
-  categorical evaluator already exposes. When an earlier tier raised
-  before a later tier succeeded, ``details["fallback_reason"]`` carries
-  the chained exception messages in attempt order, so CI and dashboards
-  can audit which path actually ran.
-- ``evaluators.split_judge_prompt_template(prompt_template)`` is the
-  helper the SQL paths use to safely substitute the template into
-  ``CONCAT()``; exposed publicly for downstream code that needs the
-  same shape.
-- ``bq-agent-sdk evaluate --exit-code`` FAIL lines now carry a bounded
-  ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback`` for
-  LLM-judge failures. The snippet collapses internal whitespace to a
-  single space, truncates to 120 characters with an ellipsis, and is
-  omitted entirely for code-based metrics (which leave
-  ``llm_feedback`` empty). CI logs now explain *why* the judge said
-  the session failed without forcing the reader to chase the JSON
-  output.
+  ``connection_id`` escape hatch when
+  ``BQAA_AI_GENERATE_CONNECTION_ID`` is set. Catches the class of
+  mock-divergence bug that let the prior broken template ship.
+- ``EvaluationReport.details["execution_mode"]`` is now populated
+  for LLM-as-Judge runs with one of ``ai_generate``,
+  ``ml_generate_text``, ``api_fallback``, or ``no_op`` — matching
+  the value space the categorical evaluator already exposes. When
+  an earlier tier raised before a later tier succeeded,
+  ``details["fallback_reason"]`` carries the chained exception
+  messages in attempt order, so CI and dashboards can audit which
+  path actually ran.
+- ``evaluators.split_judge_prompt_template(prompt_template)`` is
+  the helper the SQL paths use to safely substitute the template
+  into ``CONCAT()``; exposed publicly for downstream code that
+  needs the same shape.
+- ``bq-agent-sdk evaluate --exit-code`` FAIL lines now carry a
+  bounded ``feedback="…"`` snippet drawn from
+  ``SessionScore.llm_feedback`` for LLM-judge failures. The
+  snippet collapses internal whitespace to a single space,
+  truncates to 120 characters with an ellipsis, and is omitted
+  entirely for code-based metrics (which leave ``llm_feedback``
+  empty). CI logs now explain *why* the judge said the session
+  failed without forcing the reader to chase the JSON output.
 
 ### Changed
 
