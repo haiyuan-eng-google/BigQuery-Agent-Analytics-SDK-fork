@@ -275,22 +275,32 @@ print(report.summary())
 
 ### Strict Mode
 
-`strict=True` only changes behavior on the **AI.GENERATE** path
-(`report.details["execution_mode"] == "ai_generate"`). When the
-typed `AI.GENERATE` row comes back with an empty or NULL `scores`
-dict — the judge model returned no parseable output at all —
-`strict=False` (the default) leaves the session with `passed=True`
-by default and silently drops it from the gate. `strict=True` flips
-those sessions to `passed=False`, marks each affected
-`SessionScore.details["parse_error"] = True`, and exposes a
-report-level `parse_errors` counter under `report.details`.
+`strict=True` adds **parse-error visibility** — it does not flip
+any session's pass/fail outcome. Both BQ-native judge methods set
+`passed = bool(scores) and all(score >= threshold for score in
+scores.values())`, so a row whose `scores` dict is empty (the
+judge model returned no parseable output) already fails. Without
+`strict=True` you can't tell from the report whether a failed
+session failed because the judge gave a low score or because the
+judge gave nothing parseable at all.
 
-API-fallback parse errors don't need `strict=True`: when the Gemini
-API returns malformed output the SDK already coerces the score to
-`0.0`, so the session fails any non-zero threshold the criterion
-declared. Use `strict=True` when your evaluator relies on the
-AI.GENERATE path and you want unrecoverable rows counted, not
-ignored.
+`strict=True` walks the merged report and:
+
+- Stamps `SessionScore.details["parse_error"] = True` on every
+  session whose `scores` dict is empty.
+- Adds a report-level `details["parse_errors"]` count plus
+  `details["parse_error_rate"]` (fraction of `total_sessions`).
+
+The API-fallback path coerces malformed model output to
+`score=0.0` and always populates `scores`, so its failures look
+like low-score failures rather than parse errors. `strict=True`
+won't surface them as parse errors today; it's an AI.GENERATE /
+ML.GENERATE_TEXT visibility knob in practice.
+
+For pass/fail-only consumers (CI gates with `--exit-code`),
+`strict=True` is a no-op. Reach for it when a dashboard or
+investigation needs to distinguish "no parseable score" from
+"low score" failures.
 
 Operational counters are placed in `report.details` (not
 `aggregate_scores`) so downstream consumers can treat scores as

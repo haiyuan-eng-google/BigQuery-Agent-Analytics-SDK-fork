@@ -303,10 +303,12 @@ def evaluate(
     strict: bool = typer.Option(
         False,
         help=(
-            "Fail AI.GENERATE judge rows whose typed output is empty or"
-            " NULL (otherwise silently skipped). API-fallback parse"
-            " errors already coerce to score=0.0 and fail any non-zero"
-            " threshold without --strict."
+            "Stamp parse-error metadata on AI.GENERATE judge rows with"
+            " empty or NULL typed output. Those rows already fail"
+            " (empty score < threshold); --strict adds"
+            " details['parse_error']=True and a report-level"
+            " parse_errors counter so dashboards can tell 'no"
+            " parseable score' apart from 'low score' failures."
         ),
     ),
     endpoint: Optional[str] = typer.Option(

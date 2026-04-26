@@ -42,10 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - ``--strict`` help text and ``SDK.md §4`` clarified to match shipped
-  behavior. ``--strict`` only flips AI.GENERATE rows whose typed output
-  is empty/NULL from silently-skipped to explicitly-failed-and-counted.
-  API-fallback parse errors already coerce to ``score=0.0`` and fail
-  any non-zero threshold without ``--strict``.
+  behavior. ``--strict`` is a *visibility* knob — it stamps
+  ``details['parse_error']=True`` on AI.GENERATE/ML.GENERATE_TEXT
+  judge rows whose ``scores`` dict is empty, and adds a report-level
+  ``parse_errors`` counter. It does **not** flip any session's
+  pass/fail outcome: both BQ-native judge methods compute ``passed``
+  as ``bool(scores) and all(...)``, so empty-scores rows already
+  fail without the flag. API-fallback parse errors coerce to
+  ``score=0.0``, so they fail as low-score failures rather than
+  parse errors. For pass/fail-only CI consumers ``--strict`` is a
+  no-op; reach for it when a dashboard needs to tell "no parseable
+  score" apart from "low score."
 
 ## [0.2.2] - 2026-04-24
 
