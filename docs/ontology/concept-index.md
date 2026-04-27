@@ -63,6 +63,8 @@ gm compile binding.yaml \
 
 ## 4. Main table schema
 
+The schema below is the **logical** shape of each row. `NOT NULL` annotations are invariants the row builder maintains by construction, not BigQuery-enforced constraints — see the "Constraints" note immediately after the snippet.
+
 ```sql
 CREATE TABLE `<output_table>` (
   entity_name         STRING NOT NULL,
@@ -76,6 +78,8 @@ CREATE TABLE `<output_table>` (
   compile_fingerprint STRING NOT NULL    -- 64-hex canonical integrity key
 );
 ```
+
+**Constraints.** The Phase 1 emitter writes the table via `CREATE OR REPLACE TABLE T AS SELECT * FROM UNNEST(ARRAY<STRUCT<...>>[...])` (CTAS). BigQuery's CTAS path does **not** carry `NOT NULL` from the underlying STRUCT into table-level column constraints — the resulting columns are nullable in `INFORMATION_SCHEMA.COLUMNS`. The annotations above are the row builder's contract: every row it emits populates the six "NOT NULL" columns, by construction. If a downstream caller wants BigQuery-enforced constraints, the runbook is to wrap the emitted CTAS in an explicit two-step `CREATE OR REPLACE TABLE T (col STRING NOT NULL, ...) AS SELECT ...` form locally (or run `ALTER TABLE T ALTER COLUMN col SET NOT NULL` after the fact). The Phase 1 emitter doesn't do either — keeping the schema CTAS-only is intentional for atomicity per statement and keeps the SQL byte-deterministic.
 
 ### Row multiplicity
 
@@ -123,6 +127,8 @@ Resolvers `ORDER BY priority ASC` to pick the strongest label per entity. Never 
 The current OWL importer flattens selected-language `skos:prefLabel` / `skos:altLabel` / `skos:hiddenLabel` into `Entity.synonyms` (a flat list with no kind distinction). Non-selected-language labels keep their kind via `@<lang>`-suffixed annotation keys. So in v1, English-default SKOS imports produce `label_kind='synonym'` for what was originally pref/alt/hidden. This is acceptable: the resolver still returns these rows; they just don't outrank a plain `name` match in the priority above. A future OWL-importer fix that preserves selected-language kinds picks up the richer `label_kind` set without any change to the row builder or the runtime.
 
 ## 5. `__meta` table schema
+
+Same logical-vs-enforced caveat as §4 applies: `NOT NULL` is a row-builder invariant, not a BigQuery-enforced column constraint, because the emitter uses CTAS.
 
 ```sql
 CREATE TABLE `<output_table>__meta` (
