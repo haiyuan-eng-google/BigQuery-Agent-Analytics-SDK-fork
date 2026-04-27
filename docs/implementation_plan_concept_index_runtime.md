@@ -109,6 +109,23 @@ Tests: D6, D7, D8, D13, D15.
 
 **Out of scope**: verification, TTL re-check, shadow-path.
 
+### Phase 2 stability policy (pinned before B1)
+
+Phase 2 lands the SDK runtime surface (`OntologyRuntime`, `EntityResolver`, references) as **experimental**. Strict verification is wired in Phase 3; until then, the runtime cannot enforce its own correctness contract, so the public-API surface is held back deliberately. This avoids the silent-default-flip risk where a user relying on a Phase 2 release would see a behavior change in Phase 3 without an explicit migration step.
+
+Concretely, every Phase 2 PR observes the following four rules:
+
+1. **No package-root re-export.** `bigquery_agent_analytics/__init__.py` is **not modified** by any Phase 2 PR. Users who want the Phase 2 surface must write the explicit module path, e.g. `from bigquery_agent_analytics.ontology_runtime import OntologyRuntime`. That path stays valid in Phase 3 — no breaking import change at promotion time.
+2. **Module docstrings open with an experimental marker.** Every new Phase 2 module (`ontology_runtime.py`, `entity_resolver.py`) leads with: *"Experimental — public API contract is not stable until Phase 3 ships strict verification. Imports are deliberately not re-exported at the package root."* Visible at every reader's first line.
+3. **`verify_concept_index="off"` is the Phase 2 default.** Phase 3 flips the default to `"strict"` (and the implementation actually performs verification at that point). Users who explicitly write `verify_concept_index="off"` in Phase 2 keep that exact behavior across the flip; users who omit the kwarg get the new default.
+4. **The kwarg name and allowed values are pinned for Phase 2/3 compatibility:** `"off"`, `"missing_ok"`, `"strict"`. Phase 2 only implements `"off"`; other values may raise `NotImplementedError` until Phase 3 wires verification. The kwarg surface itself does not change between phases — only the default value and the implementation behind `"strict"` / `"missing_ok"`.
+
+Phase 3 promotion is then three concrete moves, none of which break a Phase 2 user who used the explicit-module-path import:
+
+- Add the re-exports to `bigquery_agent_analytics/__init__.py` (`OntologyRuntime`, `EntityResolver`, `ExactMatchResolver`, `SynonymResolver`, `Candidate`, `ResolveResult`, plus the four exception classes from C1).
+- Flip `verify_concept_index`'s default from `"off"` to `"strict"`.
+- Drop the experimental marker from each module's docstring.
+
 ### Phase 3 — Verification layer (strict default on)
 
 The correctness gate. Wires C2-C6 on top of Phase 2. Default changes from `"off"` to `"strict"`.
@@ -165,10 +182,12 @@ Work: `bigquery_ontology/contrib/advertising/` stub with Yahoo's resolver (if co
 - `src/bigquery_ontology/graph_ddl_compiler.py` — add `compile_concept_index(ontology, binding, *, output_table) -> str`. Preserve `compile_graph()` contract byte-identically. No changes to existing function bodies.
 - `src/bigquery_ontology/cli.py:299` — `compile` command gains `--emit-concept-index` and `--concept-index-table` flags. When absent, behavior is byte-identical to today.
 - `src/bigquery_ontology/__init__.py` — add `from .graph_ddl_compiler import compile_concept_index` so the new public function is importable as `from bigquery_ontology import compile_concept_index`, matching the existing pattern for `compile_graph` (`__init__.py:50` today).
-- `src/bigquery_agent_analytics/__init__.py` — add the new public surface to the try/except re-export block (same pattern as `Client`, `CodeEvaluator`, etc.):
+- `src/bigquery_agent_analytics/__init__.py` — **Phase 3 only** (per the Phase 2 stability policy above; Phase 2 PRs do not modify this file). Phase 3 promotion adds the new public surface to the try/except re-export block, same pattern as `Client`, `CodeEvaluator`, etc.:
   - `OntologyRuntime` from `.ontology_runtime`
   - `EntityResolver`, `ExactMatchResolver`, `SynonymResolver`, `Candidate`, `ResolveResult` from `.entity_resolver`
   - `ConceptIndexMismatchError`, `ConceptIndexProvenanceMissing`, `ConceptIndexInconsistentPair`, `ConceptIndexRefreshed` from `.ontology_runtime`
+
+  Phase 2 users access the same surface via the explicit module path (`from bigquery_agent_analytics.ontology_runtime import OntologyRuntime`); that path is preserved by Phase 3 promotion so no breaking import change occurs at the flip.
 - `docs/ontology/cli.md` — document new flags.
 - `docs/ontology/compilation.md` — mention the sibling DML emitter.
 - `docs/ontology/owl-import.md` — note that SKOS `skos:notation` lands as annotation (for #57 compatibility), and will appear as a first-class concept-index row in the resolver surface.
@@ -220,7 +239,9 @@ Guard: keep the compiler's shadow-swap path non-self-healing. The compiler detec
 
 - **Backward compatibility**: `gm compile` without `--emit-concept-index` is byte-identical to today's output. Existing users see no behavioral change.
 - **Ontology package version bump**: new public API (`compile_concept_index`, re-exported from `bigquery_ontology/__init__.py`) warrants a minor version bump. `_fingerprint.py` is internal and does not factor into semver.
-- **SDK version bump**: new public API (`OntologyRuntime`, `EntityResolver` + `ExactMatchResolver` + `SynonymResolver`, dataclasses, exception classes, all re-exported from `bigquery_agent_analytics/__init__.py`) warrants a minor version bump.
+- **SDK version bump**: split across two phases per the Phase 2 stability policy.
+  - **Phase 2** (B1-B7 + C1) lands the runtime modules as **experimental** with no package-root re-export. Users access the surface via the explicit module path. The release accompanying Phase 2 is a minor bump that flags the experimental nature in changelog notes; it does not advertise `OntologyRuntime` / resolvers / exceptions as stable public API.
+  - **Phase 3** (C2-C6) promotes the surface: `__init__.py` gets the re-exports for `OntologyRuntime`, `EntityResolver` + `ExactMatchResolver` + `SynonymResolver`, the `Candidate` / `ResolveResult` dataclasses, and the four `ConceptIndex*Error` / `ConceptIndexRefreshed` exception classes. The Phase 3 release is the version bump that advertises the stable public API.
 - **Existing resolution code in user applications**: no deprecation. Users continue their existing resolution approach until they opt into the SDK primitive.
 - **BQ permissions**: `gm compile` (with or without `--emit-concept-index`) is a pure SQL-emission command — it writes DDL to stdout or `--output` and does not call BigQuery. Only local file-system access is required at compile time. **Executing** the emitted SQL (`bq query`, console, Airflow, etc.) requires `bigquery.tables.create` on the target dataset for the main and `__meta` tables, matching the existing execute-side requirement for the `CREATE PROPERTY GRAPH` DDL emitted by `compile_graph()`. Runtime reading of the concept index via `OntologyRuntime` requires `bigquery.tables.getData` on the concept-index and meta tables (standard).
 
