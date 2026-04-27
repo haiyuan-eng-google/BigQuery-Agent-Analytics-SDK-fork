@@ -182,10 +182,12 @@ Work: `bigquery_ontology/contrib/advertising/` stub with Yahoo's resolver (if co
 - `src/bigquery_ontology/graph_ddl_compiler.py` — add `compile_concept_index(ontology, binding, *, output_table) -> str`. Preserve `compile_graph()` contract byte-identically. No changes to existing function bodies.
 - `src/bigquery_ontology/cli.py:299` — `compile` command gains `--emit-concept-index` and `--concept-index-table` flags. When absent, behavior is byte-identical to today.
 - `src/bigquery_ontology/__init__.py` — add `from .graph_ddl_compiler import compile_concept_index` so the new public function is importable as `from bigquery_ontology import compile_concept_index`, matching the existing pattern for `compile_graph` (`__init__.py:50` today).
-- `src/bigquery_agent_analytics/__init__.py` — add the new public surface to the try/except re-export block (same pattern as `Client`, `CodeEvaluator`, etc.):
+- `src/bigquery_agent_analytics/__init__.py` — **Phase 3 only** (per the Phase 2 stability policy above; Phase 2 PRs do not modify this file). Phase 3 promotion adds the new public surface to the try/except re-export block, same pattern as `Client`, `CodeEvaluator`, etc.:
   - `OntologyRuntime` from `.ontology_runtime`
   - `EntityResolver`, `ExactMatchResolver`, `SynonymResolver`, `Candidate`, `ResolveResult` from `.entity_resolver`
   - `ConceptIndexMismatchError`, `ConceptIndexProvenanceMissing`, `ConceptIndexInconsistentPair`, `ConceptIndexRefreshed` from `.ontology_runtime`
+
+  Phase 2 users access the same surface via the explicit module path (`from bigquery_agent_analytics.ontology_runtime import OntologyRuntime`); that path is preserved by Phase 3 promotion so no breaking import change occurs at the flip.
 - `docs/ontology/cli.md` — document new flags.
 - `docs/ontology/compilation.md` — mention the sibling DML emitter.
 - `docs/ontology/owl-import.md` — note that SKOS `skos:notation` lands as annotation (for #57 compatibility), and will appear as a first-class concept-index row in the resolver surface.
@@ -237,7 +239,9 @@ Guard: keep the compiler's shadow-swap path non-self-healing. The compiler detec
 
 - **Backward compatibility**: `gm compile` without `--emit-concept-index` is byte-identical to today's output. Existing users see no behavioral change.
 - **Ontology package version bump**: new public API (`compile_concept_index`, re-exported from `bigquery_ontology/__init__.py`) warrants a minor version bump. `_fingerprint.py` is internal and does not factor into semver.
-- **SDK version bump**: new public API (`OntologyRuntime`, `EntityResolver` + `ExactMatchResolver` + `SynonymResolver`, dataclasses, exception classes, all re-exported from `bigquery_agent_analytics/__init__.py`) warrants a minor version bump.
+- **SDK version bump**: split across two phases per the Phase 2 stability policy.
+  - **Phase 2** (B1-B7 + C1) lands the runtime modules as **experimental** with no package-root re-export. Users access the surface via the explicit module path. The release accompanying Phase 2 is a minor bump that flags the experimental nature in changelog notes; it does not advertise `OntologyRuntime` / resolvers / exceptions as stable public API.
+  - **Phase 3** (C2-C6) promotes the surface: `__init__.py` gets the re-exports for `OntologyRuntime`, `EntityResolver` + `ExactMatchResolver` + `SynonymResolver`, the `Candidate` / `ResolveResult` dataclasses, and the four `ConceptIndex*Error` / `ConceptIndexRefreshed` exception classes. The Phase 3 release is the version bump that advertises the stable public API.
 - **Existing resolution code in user applications**: no deprecation. Users continue their existing resolution approach until they opt into the SDK primitive.
 - **BQ permissions**: `gm compile` (with or without `--emit-concept-index`) is a pure SQL-emission command — it writes DDL to stdout or `--output` and does not call BigQuery. Only local file-system access is required at compile time. **Executing** the emitted SQL (`bq query`, console, Airflow, etc.) requires `bigquery.tables.create` on the target dataset for the main and `__meta` tables, matching the existing execute-side requirement for the `CREATE PROPERTY GRAPH` DDL emitted by `compile_graph()`. Runtime reading of the concept index via `OntologyRuntime` requires `bigquery.tables.getData` on the concept-index and meta tables (standard).
 
