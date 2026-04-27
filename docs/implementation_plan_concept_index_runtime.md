@@ -109,6 +109,23 @@ Tests: D6, D7, D8, D13, D15.
 
 **Out of scope**: verification, TTL re-check, shadow-path.
 
+### Phase 2 stability policy (pinned before B1)
+
+Phase 2 lands the SDK runtime surface (`OntologyRuntime`, `EntityResolver`, references) as **experimental**. Strict verification is wired in Phase 3; until then, the runtime cannot enforce its own correctness contract, so the public-API surface is held back deliberately. This avoids the silent-default-flip risk where a user relying on a Phase 2 release would see a behavior change in Phase 3 without an explicit migration step.
+
+Concretely, every Phase 2 PR observes the following four rules:
+
+1. **No package-root re-export.** `bigquery_agent_analytics/__init__.py` is **not modified** by any Phase 2 PR. Users who want the Phase 2 surface must write the explicit module path, e.g. `from bigquery_agent_analytics.ontology_runtime import OntologyRuntime`. That path stays valid in Phase 3 — no breaking import change at promotion time.
+2. **Module docstrings open with an experimental marker.** Every new Phase 2 module (`ontology_runtime.py`, `entity_resolver.py`) leads with: *"Experimental — public API contract is not stable until Phase 3 ships strict verification. Imports are deliberately not re-exported at the package root."* Visible at every reader's first line.
+3. **`verify_concept_index="off"` is the Phase 2 default.** Phase 3 flips the default to `"strict"` (and the implementation actually performs verification at that point). Users who explicitly write `verify_concept_index="off"` in Phase 2 keep that exact behavior across the flip; users who omit the kwarg get the new default.
+4. **The kwarg name and allowed values are pinned for Phase 2/3 compatibility:** `"off"`, `"missing_ok"`, `"strict"`. Phase 2 only implements `"off"`; other values may raise `NotImplementedError` until Phase 3 wires verification. The kwarg surface itself does not change between phases — only the default value and the implementation behind `"strict"` / `"missing_ok"`.
+
+Phase 3 promotion is then three concrete moves, none of which break a Phase 2 user who used the explicit-module-path import:
+
+- Add the re-exports to `bigquery_agent_analytics/__init__.py` (`OntologyRuntime`, `EntityResolver`, `ExactMatchResolver`, `SynonymResolver`, `Candidate`, `ResolveResult`, plus the four exception classes from C1).
+- Flip `verify_concept_index`'s default from `"off"` to `"strict"`.
+- Drop the experimental marker from each module's docstring.
+
 ### Phase 3 — Verification layer (strict default on)
 
 The correctness gate. Wires C2-C6 on top of Phase 2. Default changes from `"off"` to `"strict"`.
